@@ -4,22 +4,28 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"os/exec"
 	"time"
+	"github.com/awalterschulze/gographviz"
 )
 
-// Graph and Struct/Methods 
-
+// Graph Struct 
 type Graph struct {
-	nodes  map[int]string  // Actor ID (Name)
-	edges  map[[2]int]bool // Unique edges
-	degree map[int]int     // Node counter
+	nodes      map[int]string
+	edges      map[[2]int]string 
+	degree     map[int]int
+	lastMovie  map[[2]int]string
+	lastDate   map[[2]int]time.Time
 }
 
 func NewGraph() *Graph {
 	return &Graph{
-		nodes:  make(map[int]string),
-		edges:  make(map[[2]int]bool),
-		degree: make(map[int]int),
+		nodes:     make(map[int]string),
+		edges:     make(map[[2]int]string),
+		degree:    make(map[int]int),
+		lastMovie: make(map[[2]int]string),
+		lastDate:  make(map[[2]int]time.Time),
 	}
 }
 
@@ -29,15 +35,22 @@ func (g *Graph) AddNode(id int, name string) {
 	}
 }
 
-func (g *Graph) AddEdge(a, b int) {
+func (g *Graph) AddEdge(a, b int, movie string, date time.Time) {
 	if a == b {
 		return
 	}
 	key := [2]int{min(a, b), max(a, b)}
-	if !g.edges[key] {
-		g.edges[key] = true
+
+	if _, exists := g.edges[key]; !exists {
+		g.edges[key] = movie
+		g.lastDate[key] = date
 		g.degree[a]++
 		g.degree[b]++
+	} else {
+		if date.After(g.lastDate[key]) {
+			g.edges[key] = movie
+			g.lastDate[key] = date
+		}
 	}
 }
 
@@ -79,7 +92,7 @@ func max(a, b int) int {
 	return b
 }
 
-// TMDB Api Utils
+// TMDB API 
 const baseURL = "https://api.themoviedb.org/3"
 
 type TMDBAPIUtils struct {
@@ -159,41 +172,89 @@ func (api *TMDBAPIUtils) GetMovieCreditsForPerson(personID, startDate, endDate s
 	return filtered, nil
 }
 
-// Main Program
 
 func main() {
 	api := TMDBAPIUtils{
 		APIKey: "0c0d530e2177a2657d1a349b854bbee4",
 	}
 
-	// Laurence Fishburne (ID)
-	fishburneID := 2975
+	actorID := 2975 // Lawrence Fishburne
+	fmt.Println("Fetching Lawrence Fishburne movie credits...")
 
-	fmt.Println("Fetching Laurence Fishburne movie credits...")
-	credits, err := api.GetMovieCreditsForPerson(fmt.Sprint(fishburneID), "2000-01-01", "2025-12-31")
+	credits, err := api.GetMovieCreditsForPerson(fmt.Sprint(actorID), "2000-01-01", "2025-12-31")
 	if err != nil {
 		panic(err)
 	}
 
 	graph := NewGraph()
-	graph.AddNode(fishburneID, "Laurence Fishburne")
+	graph.AddNode(actorID, "Lawrence Fishburne")
+
+	layout := "2006-01-02"
 
 	for _, movie := range credits {
-		cast, err := api.GetMovieCast(fmt.Sprint(movie.ID), 5, []int{fishburneID})
+		cast, err := api.GetMovieCast(fmt.Sprint(movie.ID), 5, []int{actorID})
 		if err != nil {
 			continue
 		}
+
+		date, _ := time.Parse(layout, movie.ReleaseDate)
+
 		for _, actor := range cast {
 			graph.AddNode(actor.ID, actor.Name)
-			graph.AddEdge(fishburneID, actor.ID)
+			graph.AddEdge(actorID, actor.ID, movie.Title, date)
 		}
 	}
 
-	fmt.Println("\n=== Collaboration Graph for Laurence Fishburne ===")
+	// --- Stats ---
+	fmt.Println("\n=== Collaboration Graph for Lawrence Fishburne ===")
 	fmt.Printf("Total Nodes: %d\n", graph.TotalNodes())
 	fmt.Printf("Total Edges: %d\n", graph.TotalEdges())
 	fmt.Println("Max Degree Nodes:")
 	for id, name := range graph.MaxDegreeNodes() {
 		fmt.Printf("  %s (ID %d)\n", name, id)
 	}
+
+	// Visualization 
+	GenerateGraphViz(graph)
+}
+
+// Graph Visualization 
+
+func GenerateGraphViz(g *Graph) {
+	graphAst, _ := gographviz.ParseString(`digraph G {}`)
+	graphObj := gographviz.NewGraph()
+	gographviz.Analyse(graphAst, graphObj)
+
+	graphObj.SetDir(false)
+	graphObj.AddAttr("G", "splines", "true")
+	graphObj.AddAttr("G", "overlap", "false")
+
+	for id, name := range g.nodes {
+		graphObj.AddNode("G", fmt.Sprintf("n%d", id), map[string]string{
+			"label": fmt.Sprintf("\"%s\"", name),
+			"shape": "ellipse",
+			"style": "filled",
+			"fillcolor": "\"#cce5ff\"",
+		})
+	}
+
+	for edge, movie := range g.edges {
+		src := fmt.Sprintf("n%d", edge[0])
+		dst := fmt.Sprintf("n%d", edge[1])
+		graphObj.AddEdge(src, dst, false, map[string]string{
+			"label": fmt.Sprintf("\"%s\"", movie),
+		})
+	}
+
+	dotOutput := "graph.dot"
+	pngOutput := "graph.png"
+	os.WriteFile(dotOutput, []byte(graphObj.String()), 0644)
+
+	cmd := exec.Command("dot", "-Tpng", dotOutput, "-o", pngOutput)
+	err := cmd.Run()
+	if err != nil {
+		fmt.Println("⚠️ Could not generate PNG:", err)
+		return
+	}
+	fmt.Printf("\n✅ Graph visualization saved as %s\n", pngOutput)
 }
